@@ -12,12 +12,24 @@ runs=2
 mode=both
 ip_version=auto
 upload_file=
+target=cloudflare
+peer_host=
+peer_port=5201
+peer_seconds=5
+interactive=0
+[ "$#" -eq 0 ] && interactive=1
 
 usage() {
     cat <<'EOF'
 Usage: sh speedtest.sh [options]
 
+With no options, choose a test from the menu.
+
 Options:
+      --cloudflare     Run the original Cloudflare test directly
+      --peer HOST      Test against an iperf3 server directly
+      --port PORT      iperf3 port (default: 5201)
+      --seconds N      Seconds per direction for iperf3 (1-30; default: 5)
   -s, --size MB        Payload per transfer in MiB (1-100; default: 5)
   -n, --runs N         Transfers per direction (1-5; default: 2)
       --download-only  Skip upload
@@ -26,8 +38,8 @@ Options:
   -6, --ipv6           Use IPv6
   -h, --help           Show this help
 
-Measures this machine's outbound connection to Cloudflare. Default traffic is
-about 20 MiB (5 MiB x 2 transfers x 2 directions), plus tiny latency probes.
+Cloudflare uses about 20 MiB by default. Peer mode requires iperf3 on both
+machines and an iperf3 server listening on the other machine.
 EOF
 }
 
@@ -57,6 +69,23 @@ while [ "$#" -gt 0 ]; do
             runs=$2
             shift 2
             ;;
+        --cloudflare) target=cloudflare; shift ;;
+        --peer)
+            [ "$#" -ge 2 ] || die "$1 needs a host"
+            target=peer
+            peer_host=$2
+            shift 2
+            ;;
+        --port)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            peer_port=$2
+            shift 2
+            ;;
+        --seconds)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            peer_seconds=$2
+            shift 2
+            ;;
         --download-only) mode=download; shift ;;
         --upload-only) mode=upload; shift ;;
         -4|--ipv4) ip_version=4; shift ;;
@@ -65,6 +94,52 @@ while [ "$#" -gt 0 ]; do
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+if [ "$interactive" -eq 1 ]; then
+    printf 'Choose a test:\n  1) Cloudflare (current test)\n  2) Another server (iperf3)\nChoice [1/2]: '
+    IFS= read -r choice || die 'no choice entered'
+    case $choice in
+        1) target=cloudflare ;;
+        2)
+            target=peer
+            printf 'Other server IP or domain: '
+            IFS= read -r peer_host || die 'no server entered'
+            ;;
+        *) die 'choose 1 or 2' ;;
+    esac
+fi
+
+if [ "$target" = peer ]; then
+    case $peer_host in
+        ''|-*|*[!A-Za-z0-9.:-]*) die 'enter a valid IP address or domain' ;;
+    esac
+    case $peer_port in ''|*[!0-9]*) die 'port must be from 1 to 65535' ;; esac
+    case $peer_seconds in ''|*[!0-9]*) die 'seconds must be from 1 to 30' ;; esac
+    [ "$peer_port" -ge 1 ] && [ "$peer_port" -le 65535 ] || die 'port must be from 1 to 65535'
+    [ "$peer_seconds" -ge 1 ] && [ "$peer_seconds" -le 30 ] || die 'seconds must be from 1 to 30'
+    command -v iperf3 >/dev/null 2>&1 || die 'iperf3 is required for peer mode (on both servers)'
+
+    peer_request() {
+        case $ip_version in
+            4) iperf3 -4 "$@" ;;
+            6) iperf3 -6 "$@" ;;
+            *) iperf3 "$@" ;;
+        esac
+    }
+
+    printf 'Peer: %s:%s (TCP, %s seconds per direction)\n' "$peer_host" "$peer_port" "$peer_seconds"
+    if [ "$mode" != download ]; then
+        printf '\nUpload (this server -> peer):\n'
+        peer_request -c "$peer_host" -p "$peer_port" -t "$peer_seconds" -i 0 -f m || \
+            die 'peer upload failed; check iperf3 -s and TCP port on the other server'
+    fi
+    if [ "$mode" != upload ]; then
+        printf '\nDownload (peer -> this server):\n'
+        peer_request -c "$peer_host" -p "$peer_port" -t "$peer_seconds" -i 0 -f m -R || \
+            die 'peer download failed; check iperf3 -s and TCP port on the other server'
+    fi
+    exit 0
+fi
 
 case $size_mb in ''|*[!0-9]*) die 'size must be an integer from 1 to 100' ;; esac
 case $runs in ''|*[!0-9]*) die 'runs must be an integer from 1 to 5' ;; esac
